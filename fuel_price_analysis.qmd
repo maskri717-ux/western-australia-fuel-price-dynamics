@@ -1,0 +1,554 @@
+---
+title: "Western Australia Fuel Price Dynamics"
+author: "Meriam El Askri"
+subtitle: "A descriptive study of unleaded petrol prices using FuelWatch records"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    toc-title: "In this study"
+    title-block-style: none
+    css: fuel_portfolio.css
+    fig-width: 8
+    fig-dpi: 160
+    smooth-scroll: true
+    embed-resources: true
+    code-fold: true
+    code-summary: "Show R code"
+execute:
+  message: false
+  error: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(lubridate)
+library(cluster)
+
+theme_set(theme_minimal(base_size = 12))
+theme_update(
+  panel.grid.minor = element_blank(),
+  plot.title.position = "plot",
+  legend.position = "bottom",
+  text = element_text(colour = "#163832"),
+  plot.title = element_text(face = "bold", colour = "#163832"),
+  plot.subtitle = element_text(colour = "#65766F", size = 10),
+  panel.grid.major = element_line(colour = "#E6EBE5"),
+  plot.background = element_rect(fill = "white", colour = NA)
+)
+price_colour <- "#24735B"
+
+study_start <- as.Date("2024-10-01")
+study_end <- as.Date("2025-09-30")
+expected_days <- as.integer(study_end - study_start) + 1
+months <- seq(study_start, floor_date(study_end, "month"), by = "month")
+files <- paste0("data/raw/FuelWatchRetail-", format(months, "%m-%Y"), ".csv")
+missing_files <- files[!file.exists(files)]
+if (length(missing_files) > 0) {
+  stop("Missing source files: ", paste(missing_files, collapse = ", "))
+}
+
+raw <- read_csv(files, col_types = cols(.default = col_character()))
+if (nrow(problems(raw)) > 0) stop("CSV parsing problems found; inspect problems(raw).")
+required_columns <- c("PUBLISH_DATE", "PRODUCT_DESCRIPTION", "PRODUCT_PRICE",
+                      "TRADING_NAME", "REGION_DESCRIPTION", "AREA_DESCRIPTION",
+                      "BRAND_DESCRIPTION", "ADDRESS", "LOCATION", "POSTCODE")
+if (!all(required_columns %in% names(raw))) {
+  stop("Missing columns: ", paste(setdiff(required_columns, names(raw)), collapse = ", "))
+}
+
+ulp <- raw |>
+  filter(str_trim(PRODUCT_DESCRIPTION) == "ULP") |>
+  transmute(
+    date = dmy(PUBLISH_DATE, quiet = TRUE),
+    station_name = na_if(str_squish(TRADING_NAME), ""),
+    region = na_if(str_squish(REGION_DESCRIPTION), ""),
+    area = na_if(str_squish(AREA_DESCRIPTION), ""),
+    brand = replace_na(na_if(str_squish(BRAND_DESCRIPTION), ""), "Unknown"),
+    price = suppressWarnings(as.numeric(PRODUCT_PRICE))
+  )
+
+valid_rows <- ulp |>
+  filter(!is.na(date), between(date, study_start, study_end),
+         is.finite(price), price > 0,
+         !is.na(station_name), !is.na(region), !is.na(area))
+prices <- valid_rows |>
+  distinct() |>
+  group_by(station_name, region, area) |>
+  mutate(station_id = cur_group_id()) |>
+  ungroup()
+
+conflicts <- prices |> count(station_id, date) |> filter(n > 1)
+if (nrow(conflicts) > 0) {
+  stop("Conflicting station-date records found. Inspect conflicts before continuing.")
+}
+if (nrow(prices) == 0) stop("No usable ULP records in the selected period.")
+
+quality_summary <- tibble(
+  Check = c("ULP rows read", "Rows excluded by validation",
+            "Exact analytical duplicates removed", "Usable station-days",
+            "Calendar days expected", "Dates observed"),
+  Count = c(nrow(ulp), nrow(ulp) - nrow(valid_rows),
+            nrow(valid_rows) - nrow(prices), nrow(prices),
+            expected_days, n_distinct(prices$date))
+)
+
+daily_prices <- prices |>
+  group_by(date) |>
+  summarise(mean_price = mean(price), stations = n(), .groups = "drop")
+```
+
+::: {.portfolio-hero}
+<p class="eyebrow">WESTERN AUSTRALIA &middot; FUEL ANALYTICS &middot; MARKET DYNAMICS</p>
+
+# Western Australia Fuel Price Dynamics {.hero-title .unnumbered .unlisted}
+
+<p class="hero-subtitle">An analysis of FuelWatch records exploring how unleaded petrol prices vary across time, regions, brands, and individual stations.</p>
+
+<div class="hero-byline"><strong>Meriam El Askri</strong><span>Data Science for Society &amp; Business</span></div>
+<p class="hero-period">October 2024 &ndash; September 2025 &middot; ULP &middot; Prices in cents/L</p>
+:::
+
+::: {.kpi-grid aria-label="Study headline metrics"}
+::: {.kpi-card}
+<p class="kpi-label">Usable price records</p>
+<p class="kpi-value">`r format(nrow(prices), big.mark = ",")`</p>
+<p class="kpi-note">One station proxy on one date</p>
+:::
+::: {.kpi-card}
+<p class="kpi-label">Station proxies</p>
+<p class="kpi-value">`r n_distinct(prices$station_id)`</p>
+<p class="kpi-note">Trading name + region + area</p>
+:::
+::: {.kpi-card}
+<p class="kpi-label">Dates covered</p>
+<p class="kpi-value">`r n_distinct(prices$date)` <span>/ `r expected_days`</span></p>
+<p class="kpi-note">The complete study window</p>
+:::
+::: {.kpi-card}
+<p class="kpi-label">Average posted price</p>
+<p class="kpi-value">`r sprintf("%.1f", mean(daily_prices$mean_price))` <span>&cent;/L</span></p>
+<p class="kpi-note">Equal weight per daily mean</p>
+:::
+:::
+
+## Project Overview
+
+Petrol prices are a familiar household expense, but statewide averages can hide meaningful differences between local markets and individual stations. This project uses FuelWatch records to examine how unleaded petrol prices vary across Western Australia over time, across regions and brands, and between individual stations.
+
+I use the daily records to compare price levels, follow changes through the year, and identify recurring station price patterns. The aim is to understand what a statewide average leaves out and which comparisons are useful at a more local level.
+
+## Analytical Question
+
+::: {.question-card}
+<p class="eyebrow">The question guiding this study</p>
+
+**How do unleaded petrol prices vary across Western Australia, and what patterns distinguish regions, brands, time periods, and petrol stations?**
+:::
+
+I start by checking which stations and dates are represented. I then compare prices over time, within regions, and across brands before grouping stations with similar price levels and variability. The focus is on posted prices: the records can describe the market, but cannot explain retailers' decisions or estimate their profits.
+
+## Data & Preparation
+
+The analysis uses monthly retail-price files from [FuelWatch](https://www.fuelwatch.wa.gov.au/), restricted to unleaded petrol (`ULP`). Prices are expressed in cents per litre. Each usable record represents a station proxy on a particular date.
+
+**Study period:** 1 October 2024 to 30 September 2025, matching the twelve supplied monthly files. The dates are fixed so the analysis will not change its window when rerun.
+
+The twelve files must be placed in `data/raw/`, named `FuelWatchRetail-MM-YYYY.csv`. Rendering does not download or overwrite source data. This report requires R, tidyverse, lubridate, knitr, and cluster.
+
+The supplied files cover all 365 dates. The checks below found no invalid ULP rows, exact analytical duplicates, or conflicting station-date records. This gives a consistent starting point, although full calendar coverage does not mean every station reported every day.
+
+```{r}
+#| label: preparation-code
+#| ref.label: setup
+#| eval: false
+#| include: true
+```
+
+```{r}
+#| label: preparation-audit
+#| echo: false
+knitr::kable(quality_summary, caption = "Data preparation audit")
+```
+
+```{r}
+#| label: address-audit
+# Match address records to the usable station-days without changing prices.
+station_addresses <- raw |>
+  filter(str_trim(PRODUCT_DESCRIPTION) == "ULP") |>
+  transmute(
+    date = dmy(PUBLISH_DATE, quiet = TRUE),
+    station_name = str_squish(TRADING_NAME),
+    region = str_squish(REGION_DESCRIPTION),
+    area = str_squish(AREA_DESCRIPTION),
+    address = ADDRESS, locality = LOCATION, postcode = POSTCODE
+  ) |>
+  semi_join(prices, by = c("date", "station_name", "region", "area")) |>
+  distinct(station_name, region, area, address, locality, postcode)
+
+address_name_counts <- station_addresses |>
+  group_by(address, locality, postcode) |>
+  summarise(trading_names = n_distinct(station_name), .groups = "drop")
+proxy_address_counts <- station_addresses |>
+  count(station_name, region, area, name = "address_combinations")
+multiple_name_addresses <- sum(address_name_counts$trading_names > 1)
+single_address_proxies <- sum(proxy_address_counts$address_combinations == 1)
+```
+
+I identify stations using trading name, region, and area. Brand remains a separate attribute, so a brand change alone does not create a new station. The address check maps `r single_address_proxies` of `r nrow(proxy_address_counts)` proxies to exactly one address/locality/postcode combination in these files.
+
+An address check found `r multiple_name_addresses` address/locality/postcode combinations with multiple trading names during the year. Some may be renamed outlets, so the `r n_distinct(prices$station_id)` proxies are not a count of verified physical sites. I keep these names separate until a reliable mapping between outlets is available.
+
+The preparation rules exclude invalid or out-of-window dates, missing station-location fields, and prices that are non-finite or non-positive. Exact analytical duplicates would be removed, while conflicting station-date records would stop execution for review. None required removal in these files. I retain positive price extremes because an unusual price is not, by itself, evidence of an error.
+
+```{r}
+#| label: price-range
+prices |>
+  summarise(
+    Minimum = min(price),
+    `1st percentile` = quantile(price, 0.01),
+    Median = median(price),
+    `99th percentile` = quantile(price, 0.99),
+    Maximum = max(price)
+  ) |>
+  knitr::kable(digits = 1, caption = "Price range for review (cents/L)")
+```
+
+## Market Coverage
+
+Before comparing prices, I check how much of the dataset comes from each region and how consistently stations report. These counts describe the evidence available for the analysis; they do not measure sales or market share.
+
+```{r}
+#| label: station-coverage
+#| fig-alt: "Bar chart of observed station proxies by region. Metro has the most stations, followed by South-West; Gascoyne has the fewest."
+station_summary <- prices |>
+  group_by(station_id, station_name, region, area) |>
+  summarise(
+    days_observed = n_distinct(date),
+    mean_price = mean(price),
+    sd_price = sd(price),
+    brand = if (n_distinct(brand) == 1) first(brand) else "Multiple brands",
+    .groups = "drop"
+  ) |>
+  mutate(coverage = days_observed / expected_days)
+
+region_coverage <- station_summary |>
+  group_by(region) |>
+  summarise(
+    stations = n(),
+    station_days = sum(days_observed),
+    median_coverage_pct = 100 * median(coverage),
+    complete_stations = sum(days_observed == expected_days),
+    .groups = "drop"
+  ) |>
+  arrange(desc(stations))
+
+knitr::kable(region_coverage, digits = 1,
+             col.names = c("Region", "Observed stations", "Station-days",
+                           "Median coverage (%)", "Complete stations"),
+             caption = "Regional coverage of the selected files")
+
+ggplot(region_coverage, aes(stations, fct_reorder(region, stations))) +
+  geom_col(fill = price_colour) +
+  labs(title = "Observed station coverage by region",
+       subtitle = "Distinct station proxies with at least one usable ULP price",
+       x = "Observed stations", y = NULL)
+```
+
+Metro accounts for the largest share of observed station proxies and station-days. Its prices therefore carry more weight in the statewide daily average than those of regions with fewer reporting stations. That makes regional comparisons essential to understanding the broader market.
+
+For time trends, each reporting station has equal weight within a date. These averages describe the available posted prices, not the prices weighted by how much fuel people bought. Later, I hold the station sample constant by using only proxies observed on every study date.
+
+## Price Trends
+
+I first look at how the average posted price changed through the year. The daily series retains short-term movements, while monthly averages make broader changes easier to compare. Each date has equal weight in its monthly average. The table also tracks reporting counts because changes in the available stations can affect the result.
+
+```{r}
+#| label: time-trends
+#| fig-alt: "Daily statewide mean ULP prices from October 2024 to September 2025, showing repeated sharp movements. Monthly means peak in January and are lowest in May."
+#| fig-height: 4.5
+monthly_prices <- daily_prices |>
+  mutate(month = floor_date(date, "month")) |>
+  group_by(month) |>
+  summarise(mean_price = mean(mean_price),
+            observed_dates = n(), min_stations = min(stations),
+            max_stations = max(stations), .groups = "drop")
+
+ggplot(daily_prices, aes(date, mean_price)) +
+  geom_line(colour = price_colour, linewidth = 0.45) +
+  labs(title = "Daily average unleaded petrol price",
+       subtitle = "Equal weight per reporting station on each date",
+       x = NULL, y = "Mean posted price (cents/L)")
+
+knitr::kable(monthly_prices, digits = 1,
+             col.names = c("Month", "Mean price (cents/L)", "Observed dates",
+                           "Fewest stations/day", "Most stations/day"),
+             caption = "Monthly price levels and daily coverage")
+```
+
+The monthly mean was highest in January 2025 and lowest in May 2025, before rising again later in the year. A single annual average would hide those changes as well as the repeated sharp movements in the daily series.
+
+To examine the calendar pattern more closely, I compare weekday averages within each region on a shared price scale. Averaging across the year shows which days tended to be higher or lower, but does not establish that the pattern held in every week.
+
+```{r}
+#| label: regional-weekdays
+#| fig-alt: "Weekday mean prices across ten regions on a shared scale. Metro and Peel have pronounced Tuesday lows and Wednesday highs; other regions have smaller differences."
+#| fig-height: 7
+regional_daily <- prices |>
+  group_by(region, date) |>
+  summarise(mean_price = mean(price), .groups = "drop")
+weekday_prices <- regional_daily |>
+  mutate(weekday = wday(date, week_start = 1)) |>
+  group_by(region, weekday) |>
+  summarise(mean_price = mean(mean_price), .groups = "drop")
+
+ggplot(weekday_prices, aes(weekday, mean_price)) +
+  geom_line(colour = price_colour) +
+  geom_point(colour = price_colour, size = 1.6) +
+  facet_wrap(~ region, ncol = 2) +
+  scale_x_continuous(breaks = 1:7,
+                     labels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")) +
+  labs(title = "Average price by weekday within each region",
+       subtitle = "Each observed regional daily mean has equal weight",
+       x = NULL, y = "Mean posted price (cents/L)")
+```
+
+Metro and Peel have the clearest weekday differences. Tuesday has the lowest average and Wednesday the highest, with gaps of 31.3 and 28.6 cents/L respectively. The timing of a price comparison can therefore matter considerably in these regions. These historical averages are not a guarantee of the cheapest day at a particular station.
+
+Elsewhere, weekday differences are much smaller. A flat weekday profile means there is little average separation between days of the week, not that prices were unchanged throughout the year.
+
+## Regional & Brand Differences
+
+To compare regional and brand price levels over the same dates, I use stations with a usable price on **every date in the fixed study window**. The window contains 365 days, calculated from its start and end dates. I do not fill in missing prices.
+
+This complete panel makes the time coverage comparable, but narrows the question to consistently observed station proxies. It can leave out new, closing, renamed, or intermittently reporting outlets. The coverage table shows how much of each region remains.
+
+```{r}
+#| label: complete-panel
+complete_stations <- station_summary |> filter(days_observed == expected_days)
+if (nrow(complete_stations) < 2) {
+  stop("Too few fully observed stations. Review coverage before station comparisons.")
+}
+complete_prices <- prices |> semi_join(complete_stations, by = "station_id")
+```
+
+The complete panel retains `r nrow(complete_stations)` of `r nrow(station_summary)` station proxies (`r round(100 * nrow(complete_stations) / nrow(station_summary), 1)`%). Each retained station has equal weight in its regional average. The lines below span the lowest and highest station means within a region; they are not confidence intervals.
+
+```{r}
+#| label: regional-price-chart
+#| fig-alt: "Regional means and ranges of station mean prices in the complete panel. Metro has the lowest regional mean and Kimberley the highest."
+#| fig-height: 4.5
+regional_summary <- complete_stations |>
+  group_by(region) |>
+  summarise(stations = n(), lowest_station_mean = min(mean_price),
+            highest_station_mean = max(mean_price),
+            mean_price = mean(mean_price), .groups = "drop")
+
+ggplot(regional_summary, aes(mean_price, fct_reorder(region, mean_price))) +
+  geom_segment(aes(x = lowest_station_mean, xend = highest_station_mean,
+                   yend = fct_reorder(region, mean_price)), colour = "#9AAF9F") +
+  geom_point(colour = price_colour, size = 2.5) +
+  labs(title = "Regional price levels across fully observed stations",
+       subtitle = "Point: regional mean; line: range of station means",
+       x = "Station mean price (cents/L)", y = NULL)
+```
+
+Metro has the lowest regional mean among complete stations (173.8 cents/L), while Kimberley has the highest (222.2 cents/L). Motorists in these regions faced different average posted price levels over the study period, although the comparison covers 371 station proxies in Metro and only 12 in Kimberley.
+
+The ranges also show variation within regions. A regional average is useful context, but it cannot stand in for the price level at every local outlet.
+
+Brand comparisons need the same geographic context. I compare each brand with the complete-panel average in its own region, rather than treating a statewide ranking as a like-for-like comparison. This accounts for broad regional grouping only: brands may still serve different towns or neighbourhoods within a region.
+
+```{r}
+#| label: brand-comparison
+brand_region <- complete_stations |>
+  filter(!brand %in% c("Unknown", "Multiple brands")) |>
+  group_by(region, brand) |>
+  summarise(stations = n(), brand_mean = mean(mean_price), .groups = "drop") |>
+  left_join(regional_summary |> select(region, region_mean = mean_price),
+            by = "region") |>
+  mutate(difference = brand_mean - region_mean) |>
+  arrange(region, difference)
+
+knitr::kable(brand_region, digits = 1,
+             col.names = c("Region", "Brand", "Stations", "Brand mean (cents/L)",
+                           "Region mean (cents/L)", "Difference (cents/L)"),
+             caption = "Brand averages relative to their regional benchmark")
+```
+
+Positive differences mean a brand averaged above its regional benchmark. In Metro, Vibe and United sit below that benchmark, while BP and Caltex sit above it. The table gives a starting point for local comparisons, not a claim that one brand is always cheaper.
+
+Brand position also varies by region. For example, BP is below the benchmark in Gascoyne and Goldfields-Esperance but above it in Kimberley. Some comparisons involve only one station, so the counts are essential context.
+
+Five complete station proxies changed brand and are excluded from the brand table. Unknown or changing brands remain in the regional benchmark, which represents all complete stations.
+
+## Station Price Dynamics
+
+An annual average alone does not describe the range of prices a station posted. I compare each complete station's mean with the standard deviation of its daily prices. A larger standard deviation means prices were more spread out over the year. It does not tell us whether that spread came from regular cycles, a gradual trend, or occasional jumps.
+
+```{r}
+#| label: station-dynamics
+#| fig-alt: "Station mean price versus daily price standard deviation, coloured by region. Similar mean prices can accompany different variability, and some expensive stations have low variability."
+#| fig-height: 5
+ggplot(complete_stations, aes(mean_price, sd_price, colour = region)) +
+  geom_point(alpha = 0.65, size = 1.8) +
+  scale_colour_manual(values = c(
+    "Gascoyne" = "#D49A32", "Goldfields-Esperance" = "#8B672A",
+    "Great Southern" = "#65766F", "Kimberley" = "#163832",
+    "Metro" = "#24735B", "Mid-West" = "#466D58",
+    "Peel" = "#79865B", "Pilbara" = "#C8B98D",
+    "South-West" = "#9AAF9F", "Wheatbelt" = "#B5C4B9"
+  )) +
+  guides(colour = guide_legend(nrow = 3)) +
+  labs(title = "Station price levels and variability",
+       subtitle = "One point per station observed on every study date",
+       x = "Mean posted price (cents/L)",
+       y = "Daily price SD (cents/L)", colour = "Region")
+```
+
+Stations with similar average prices can have very different levels of variability. The chart also includes high-price stations with relatively little variation. Comparing price level and variability together avoids treating an expensive station as automatically more volatile.
+
+For a reader comparing outlets, these are separate questions: how high were prices on average, and how much did they vary? Neither measure identifies the cheapest station on a particular date.
+
+## Clustering / Station Pricing Patterns
+
+The scatter plot contains many individual stations. I use exploratory k-means clustering to summarize them into groups with similar average prices and variability. Both features are standardized so differences in their scales do not determine the grouping. The method uses these two summaries, not the sequence of daily prices.
+
+I compare two to five clusters using average silhouette width. This score measures how closely stations fit their assigned group compared with other groups. Higher values indicate clearer separation; values near zero indicate overlap, and negative values can indicate a poor assignment. The candidate range is kept small to produce a readable summary rather than a detailed market segmentation.
+
+```{r}
+#| label: clustering
+features <- complete_stations |> select(mean_price, sd_price)
+if (any(!is.finite(as.matrix(features))) || any(sapply(features, sd) == 0)) {
+  stop("Clustering requires finite, varying station features.")
+}
+max_k <- min(5L, nrow(distinct(features)) - 1L, nrow(features) - 1L)
+if (max_k < 2) stop("Too few distinct station profiles for clustering.")
+
+scaled_features <- scale(features)
+station_distances <- dist(scaled_features)
+candidate_k <- 2:max_k
+models <- vector("list", length(candidate_k))
+silhouette_scores <- numeric(length(candidate_k))
+set.seed(42)
+for (i in seq_along(candidate_k)) {
+  models[[i]] <- kmeans(scaled_features, centers = candidate_k[i],
+                        nstart = 50, iter.max = 100)
+  silhouette_scores[i] <- mean(
+    silhouette(models[[i]]$cluster, station_distances)[, "sil_width"]
+  )
+}
+cluster_diagnostics <- tibble(k = candidate_k, silhouette = silhouette_scores)
+knitr::kable(cluster_diagnostics, digits = 3,
+             col.names = c("Number of clusters", "Average silhouette width"),
+             caption = "Separation of candidate k-means solutions")
+
+best_index <- which.max(silhouette_scores)
+best_k <- candidate_k[best_index]
+clustered_stations <- complete_stations |>
+  mutate(cluster = factor(models[[best_index]]$cluster))
+cluster_profiles <- clustered_stations |>
+  group_by(cluster) |>
+  summarise(stations = n(), mean_price = mean(mean_price),
+            mean_sd = mean(sd_price), .groups = "drop")
+knitr::kable(cluster_profiles, digits = 1,
+             col.names = c("Cluster", "Stations", "Average station mean (cents/L)",
+                           "Average station SD (cents/L)"),
+             caption = "Cluster profiles in the original price units")
+```
+
+The best-scoring candidate has `r best_k` clusters, with an average silhouette width of `r round(max(silhouette_scores), 3)`. This is the strongest separation among the tested options, not proof that the market contains exactly this many distinct groups.
+
+Cluster numbers are simply labels. Multiple starting points reduce sensitivity to the initial grouping, and the fixed seed makes the run reproducible. Neither checks whether the same groups would appear in another year or a different station sample.
+
+```{r}
+#| label: cluster-profiles
+#| fig-alt: "Three clusters of complete stations by mean price and daily price standard deviation. Groups distinguish higher variability, high prices with low variability, and lower prices with lower variability. Crosses mark cluster averages."
+#| fig-height: 4.5
+ggplot(clustered_stations, aes(mean_price, sd_price, colour = cluster)) +
+  geom_point(alpha = 0.6, size = 1.7) +
+  scale_colour_manual(values = c("#24735B", "#D49A32", "#65766F")) +
+  geom_point(data = cluster_profiles, aes(mean_price, mean_sd),
+             shape = 4, size = 4, stroke = 1.4) +
+  labs(title = "Exploratory groups of station price profiles",
+       subtitle = "Crosses show cluster averages in original units",
+       x = "Mean posted price (cents/L)",
+       y = "Daily price SD (cents/L)", colour = "Cluster")
+
+clustered_stations |>
+  count(region, cluster, .drop = FALSE) |>
+  group_by(region) |>
+  mutate(share_pct = 100 * n / sum(n)) |>
+  ungroup() |>
+  knitr::kable(digits = 1,
+               col.names = c("Region", "Cluster", "Stations", "Regional share (%)"),
+               caption = "Cluster composition within each region of the complete panel")
+```
+
+The three profiles separate 305 stations with higher variability, 30 with high average prices and low variability, and 278 with lower average prices and lower variability. These descriptions are relative to this sample.
+
+The distinction is useful because similar averages can conceal different price experiences over time. The high-price group also shows that a relatively steady price can still be expensive. Clustering brings these combinations into a manageable summary without claiming to explain how retailers set their prices.
+
+The higher-variability group contains most complete stations in Metro and Peel. The high-price, low-variability group includes all complete Gascoyne stations and most complete Kimberley stations. Regional percentages make those patterns comparable despite different sample sizes.
+
+The cluster plot uses the same features that formed the groups, so its visible separation is not an independent validation. These are descriptive price profiles, not proven retailer strategies or evidence about consumer behaviour.
+
+## Key Findings {.findings-section}
+
+Taken together, the comparisons show why price level, timing, and location need to be considered alongside one another.
+
+::: {.finding-grid}
+
+```{r}
+#| label: findings
+#| echo: false
+#| results: asis
+lowest_month <- monthly_prices |> slice_min(mean_price, n = 1, with_ties = FALSE)
+highest_month <- monthly_prices |> slice_max(mean_price, n = 1, with_ties = FALSE)
+cat(sprintf(
+  "- **Coverage shapes the comparison:** %s station-days from %s station proxies cover %s of %s dates. Metro contributes most records, so the statewide average is more influenced by its reporting stations.\n\n",
+  format(nrow(prices), big.mark = ","), nrow(station_summary),
+  n_distinct(prices$date), expected_days
+))
+cat(sprintf(
+  "- **One average is not the whole market:** the mean of statewide daily averages is %.1f cents/L. It provides a reference point, but hides differences between regions and between days of the week.\n\n",
+  mean(daily_prices$mean_price)
+))
+cat(sprintf(
+  "- **Timing matters:** monthly means range from %.1f cents/L in %s to %.1f cents/L in %s (first month shown if tied). Metro and Peel also show pronounced weekday differences, so both the month and day provide useful context.\n\n",
+  lowest_month$mean_price, format(lowest_month$month, "%B %Y"),
+  highest_month$mean_price, format(highest_month$month, "%B %Y")
+))
+cat(sprintf(
+  "- **Local context matters:** complete-panel averages range from %.1f to %.1f cents/L across %s regions. Brand comparisons are more informative against their regional benchmark, though local differences remain.\n\n",
+  min(regional_summary$mean_price), max(regional_summary$mean_price),
+  nrow(regional_summary)
+))
+cat(sprintf(
+  "- **Price level and variability are distinct:** the median station price standard deviation is %.1f cents/L. The %s descriptive clusters include a high-price group with low variability, showing that relatively steady prices are not necessarily low prices.\n",
+  median(complete_stations$sd_price), best_k
+))
+```
+
+:::
+
+## Limitations {.limitations-section}
+
+- **Study window:** the confirmed period is October 2024 to September 2025. Weekday averages describe this year as a whole and may hide changes within it; they should not be treated as forecasts.
+- **Coverage and identity:** a station name is not a permanent outlet identifier. Name changes can split one physical site into separate proxies and prevent either from entering the complete panel. The regional and brand comparisons therefore describe the retained proxies, not necessarily every operating outlet.
+- **Prices versus purchases:** posted prices do not tell us how much fuel was bought, what discounts applied, or what households actually spent. The averages cannot establish expenditure, market share, margins, or profits.
+- **Comparability:** comparing brands within a region still leaves differences in local areas, services, and operating conditions unaccounted for. A difference from the benchmark cannot be attributed to the brand alone.
+- **Clustering:** two stations with similar means and standard deviations can have different daily price sequences. K-means is sensitive to extremes and favours compact groups in the standardized feature space. The groups are useful summaries of this sample; their stability across periods or samples has not been tested.
+- **Source verification:** observed prices range from 136.7 to 248.9 cents/L. Extreme records were inspected and retained, but were not independently checked against original station postings. Passing the preparation checks establishes usable records, not independent confirmation of every price.
+
+Questions about transport costs, competition, or brand policies would require additional evidence. They are possible directions for further investigation, rather than explanations established by these price records.
+
+## Conclusion {.closing-panel}
+
+Unleaded petrol prices varied across Western Australia in several ways during the study period. Metro and Peel had pronounced weekday differences, regional averages differed substantially, and brand comparisons depended on the region being examined. Individual stations also differed in how much their prices varied, even when their average prices were similar.
+
+The clustering adds a compact description of those station differences, including a small group with high prices and relatively low variability. It does not establish why those patterns occurred.
+
+FuelWatch records make it possible to distinguish where posted prices were higher, when they tended to change, and how much variation individual stations experienced. The grounded takeaway is that understanding the WA fuel market requires more than a statewide average: local price levels and their movement over time tell different parts of the story.

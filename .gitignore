@@ -1,0 +1,33 @@
+# Local Quarto output and caches
+.quarto/
+_freeze/
+*_cache/
+fuel_price_analysis_files/
+
+# Original course materials and alternate report
+/Project_FuelWatch_Meriam-main/
+/Project_FuelWatch_Meriam-main.zip
+/report.qmd
+
+# Obtain raw data directly from FuelWatch; redistribution is not established
+/data/raw/
+FuelWatchRetail-*.csv
+
+# R session and editor files
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+Rplots.pdf
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
